@@ -32,3 +32,12 @@ extension CGColor {
         cgColorFromHex(hex) ?? CGColor(gray: 0.5, alpha: 1)
     }
 }
+
+#if !os(macOS)
+// CGColor.white / .black / .clear only exist on macOS; BotEngine uses them.
+extension CGColor {
+    static var white: CGColor { CGColor(gray: 1, alpha: 1) }
+    static var black: CGColor { CGColor(gray: 0, alpha: 1) }
+    static var clear: CGColor { CGColor(gray: 0, alpha: 0) }
+}
+#endif
