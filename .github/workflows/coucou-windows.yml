@@ -1,0 +1,100 @@
+name: Coucou Windows installer
+run-name: Coucou Windows build ${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: Unique multibuilder request id used to correlate this run and artifact
+        required: true
+        type: string
+      source_sha:
+        description: Exact public Louis-CFM/coucou commit to build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coucou-windows-${{ inputs.request_id }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Validate request inputs
+        shell: pwsh
+        env:
+          REQUEST_ID: ${{ inputs.request_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          if ($env:REQUEST_ID -notmatch '^[0-9a-f]{32}$') { throw 'Invalid request_id' }
+          if ($env:SOURCE_SHA -notmatch '^[0-9a-fA-F]{40}$') { throw 'Invalid source_sha' }
+
+      - name: Check out the exact Coucou source revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: Louis-CFM/coucou
+          ref: ${{ inputs.source_sha }}
+          path: coucou
+          persist-credentials: false
+
+      - name: Verify checked-out source revision
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          $actual = (git -C coucou rev-parse HEAD).Trim()
+          if ($actual -ne $env:SOURCE_SHA) { throw "Source revision mismatch: $actual" }
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Set up stable Rust for MSVC
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Install Windows packaging dependencies
+        shell: pwsh
+        working-directory: coucou/windows
+        run: npm ci
+
+      - name: Build the Windows setup installer
+        shell: pwsh
+        working-directory: coucou/windows
+        run: npm run pack
+
+      - name: Prepare correlated artifact and checksum manifest
+        shell: pwsh
+        env:
+          REQUEST_ID: ${{ inputs.request_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          $installers = @(Get-ChildItem -Path 'coucou/windows/release' -Filter 'Coucou-Windows-*-setup.exe' -File)
+          if ($installers.Count -ne 1) { throw "Expected exactly one Coucou setup installer, found $($installers.Count)" }
+          if ($installers[0].Name -notmatch '^Coucou-Windows-(\d+\.\d+\.\d+)-setup\.exe$') { throw "Unexpected installer name: $($installers[0].Name)" }
+          $output = New-Item -ItemType Directory -Path 'coucou-artifact' -Force
+          Copy-Item -LiteralPath $installers[0].FullName -Destination $output.FullName
+          $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $output.FullName $installers[0].Name)).Hash.ToLowerInvariant()
+          $manifest = @{
+            request_id = $env:REQUEST_ID
+            source_sha = $env:SOURCE_SHA
+            installer_name = $installers[0].Name
+            sha256 = $digest
+          }
+          $manifest | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $output.FullName 'manifest.json') -Encoding utf8NoBOM
+
+      - name: Upload request-correlated setup installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coucou-windows-${{ inputs.request_id }}
+          path: coucou-artifact/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
